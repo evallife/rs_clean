@@ -3,7 +3,9 @@ use colored::*;
 use rs_clean::cmd::Cmd;
 use rs_clean::config::Config;
 use rs_clean::constant::get_cmd_map;
-use rs_clean::do_clean_all;
+use rs_clean::do_clean_selected_projects;
+use rs_clean::scan_deletion_preview;
+use rs_clean::show_deletion_preview_and_select;
 use rs_clean::utils::command_exists;
 use rs_clean::get_cpu_core_count;
 use std::time::Instant;
@@ -57,7 +59,7 @@ async fn main() {
         init_cmd.join(", ").blue()
     );
     
-    // 显示并发限制和安全信息
+    // show the concurrent limits and safety information
     let cpu_cores = get_cpu_core_count();
     println!(
         "Using {} concurrent worker{} (CPU cores: {})",
@@ -71,10 +73,39 @@ async fn main() {
         config.max_files_per_project
     );
 
-    let count = do_clean_all(
+    // interactive selection process (default behavior)
+    println!("{}", "Scanning for projects to clean...".blue());
+    
+    let selected_projects = match scan_deletion_preview(
         &config.path,
         &cmd_list,
         &config.exclude_dir,
+        config.max_directory_depth,
+        config.max_files_per_project,
+    ).await {
+        Ok(projects) => {
+            match show_deletion_preview_and_select(&projects, config.dry_run, config.no_confirm).await {
+                Ok(selected) => selected,
+                Err(e) => {
+                    eprintln!("{} Error during selection: {}", "Error:".red(), e);
+                    std::process::exit(1);
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("{} Error scanning projects: {}", "Error:".red(), e);
+            std::process::exit(1);
+        }
+    };
+
+    if selected_projects.is_empty() {
+        println!("{}", "No projects selected for cleaning".yellow());
+        return;
+    }
+
+    let count = do_clean_selected_projects(
+        selected_projects,
+        &cmd_list,
         Some(cpu_cores),
         config.max_directory_depth,
         config.max_files_per_project,

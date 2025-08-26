@@ -28,11 +28,52 @@ graph TD
 $ rs_clean folder/
 ```
 
-🗂 该命令将清除指定 `folder/` 目录及其子目录下的 **Rust 项目的 target 文件夹**，以及其他支持项目（Go、Gradle、Maven）的编译缓存。
+**🎯 全新交互式体验！**
+现在运行 `rs_clean` 时，会先显示将要删除的内容，并要求您确认：
 
-您也可以指定要排除的目录名称：
 ```bash
+$ rs_clean my_projects/
+
+Scanning for projects to clean...
+
+=== Deletion Preview ===
+Found projects to clean:
+  1. my_projects/rust_app (cargo) - 156.2 MB
+  2. my_projects/go_service (go) - 45.8 MB
+  3. my_projects/gradle_app (gradle) - 89.1 MB
+
+Total space to be freed: 291.1 MB
+
+Select cleaning mode:
+> Clean all projects
+  Select specific projects to clean
+  Review each project individually
+  Cancel operation
+```
+
+### 🎮 操作指南
+- **方向键**：在选项间导航
+- **回车键**：确认选择
+- **空格键**：选择/取消选择项目（多选模式）
+- **ESC**：取消操作
+
+### 📋 命令行选项
+
+```bash
+# 基本用法（带交互确认）
+$ rs_clean folder/
+
+# 跳过确认提示（适用于自动化脚本）
+$ rs_clean folder/ --no-confirm
+
+# 预览将要删除的内容但不实际删除
+$ rs_clean folder/ --dry-run
+
+# 排除特定目录
 $ rs_clean folder/ --exclude-dir node_modules --exclude-dir build
+
+# 显示详细输出
+$ rs_clean folder/ --verbose
 ```
 
 ---

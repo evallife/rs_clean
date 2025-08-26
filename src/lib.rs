@@ -6,9 +6,11 @@ pub mod utils;
 
 use crate::cmd::Cmd;
 use colored::*;
+use dialoguer::{Select, MultiSelect};
 use futures::future;
 use indicatif::{ProgressBar, ProgressStyle};
-use std::path::Path;
+use std::io::IsTerminal;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::{fs, sync::Semaphore};
 use walkdir::WalkDir;
@@ -56,62 +58,242 @@ async fn get_dir_size_async(path: &Path, max_depth: usize, max_files: usize) -> 
     total_size
 }
 
-// 获取CPU逻辑核心数
+// get the number of CPU logical cores
 pub fn get_cpu_core_count() -> usize {
     std::thread::available_parallelism()
         .map(|n| n.get())
-        .unwrap_or(4) // 默认4个核心
+        .unwrap_or(4) // default 4 cores
 }
 
-pub async fn do_clean_all(
+/// scan and show the preview of the projects to be deleted
+pub async fn scan_deletion_preview(
     dir: &Path,
     commands: &Vec<Cmd>,
     exclude_dirs: &Vec<String>,
-    max_concurrent: Option<usize>,
     max_directory_depth: usize,
     max_files_per_project: usize,
-) -> u32 {
+) -> Result<Vec<(PathBuf, String, u64)>, Box<dyn std::error::Error>> {
     let entries: Vec<_> = WalkDir::new(dir)
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_dir())
         .collect();
 
-    let cleaning_tasks: Vec<_> = entries
-        .iter()
-        .filter_map(|entry| {
-            let path = entry.path();
-            if let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) {
-                if dir_name.starts_with('.') || exclude_dirs.contains(&dir_name.to_string()) {
-                    return None;
-                }
-            }
+    let mut projects_to_clean = vec![];
 
-            let mut tasks_for_dir = vec![];
-            for cmd in commands.iter() {
-                if cmd
-                    .related_files
-                    .iter()
-                    .any(|file| path.join(file).exists())
-                {
-                    tasks_for_dir.push((path.to_path_buf(), cmd.command_type));
+    for entry in entries {
+        let path = entry.path();
+        if let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) {
+            if dir_name.starts_with('.') || exclude_dirs.contains(&dir_name.to_string()) {
+                continue;
+            }
+        }
+
+        for cmd in commands.iter() {
+            if cmd
+                .related_files
+                .iter()
+                .any(|file| path.join(file).exists())
+            {
+                let size = get_dir_size_async(path, max_directory_depth, max_files_per_project).await;
+                if size > 0 {
+                    projects_to_clean.push((path.to_path_buf(), cmd.command_type.as_str().to_string(), size));
+                }
+                break;
+            }
+        }
+    }
+
+    Ok(projects_to_clean)
+}
+
+/// show the deletion preview and get user selection
+pub async fn show_deletion_preview_and_select(
+    projects: &Vec<(PathBuf, String, u64)>,
+    dry_run: bool,
+    no_confirm: bool,
+) -> Result<Vec<(PathBuf, String, u64)>, Box<dyn std::error::Error>> {
+    if projects.is_empty() {
+        println!("{}", "No projects found to clean".yellow());
+        return Ok(vec![]);
+    }
+
+    let total_size: u64 = projects.iter().map(|(_, _, size)| size).sum();
+    
+    println!("\n{}", "=== Deletion Preview ===".bold().cyan());
+    println!("{}", "Found projects to clean:".yellow());
+    
+    for (i, (path, cmd_type, size)) in projects.iter().enumerate() {
+        println!("  {}. {} ({}) - {}", 
+            i + 1,
+            path.display().to_string().green(),
+            cmd_type.purple(),
+            format_size(*size).yellow()
+        );
+    }
+    
+    println!("\n{}", format!("Total space to be freed: {}", format_size(total_size).bold().red()));
+    
+    if dry_run {
+        println!("{}", "Dry run mode - no files will be deleted".yellow());
+        return Ok(vec![]);
+    }
+
+    if no_confirm {
+        println!("{}", "Skipping confirmation prompt - cleaning all projects".yellow());
+        return Ok(projects.clone());
+    }
+
+    if !std::io::stdin().is_terminal() {
+        println!("{}", "Non-interactive environment detected. Use --no-confirm to proceed without confirmation.".yellow());
+        return Ok(vec![]);
+    }
+
+    // ask user to select the cleaning mode
+    let selection_mode = Select::new()
+        .with_prompt("Select cleaning mode:")
+        .items(&[
+            "Clean all projects",
+            "Select specific projects to clean",
+            "Review each project individually",
+            "Cancel operation"
+        ])
+        .default(0)
+        .interact()?;
+
+    match selection_mode {
+        0 => { // Clean all
+            let confirm = Select::new()
+                .with_prompt("Clean all selected projects?")
+                .items(&["Yes, clean all projects", "No, cancel operation"])
+                .default(1)
+                .interact()?;
+            if confirm == 0 {
+                Ok(projects.clone())
+            } else {
+                Ok(vec![])
+            }
+        }
+        1 => { // Select specific projects
+            let project_items: Vec<String> = projects.iter()
+                .map(|(path, cmd_type, size)| 
+                    format!("{} ({}) - {}", 
+                        path.display().to_string(),
+                        cmd_type,
+                        format_size(*size)
+                    )
+                )
+                .collect();
+            
+            let selected_indices = MultiSelect::new()
+                .with_prompt("Select projects to clean (space to select, enter to confirm):")
+                .items(&project_items)
+                .interact()?;
+            
+            let selected_projects: Vec<(PathBuf, String, u64)> = selected_indices
+                .into_iter()
+                .map(|i| projects[i].clone())
+                .collect();
+            
+            if !selected_projects.is_empty() {
+                let selected_size: u64 = selected_projects.iter().map(|(_, _, size)| size).copied().sum::<u64>();
+                println!("\nSelected projects will free: {}", format_size(selected_size).bold().red());
+                
+                let confirm = Select::new()
+                    .with_prompt("Clean selected projects?")
+                    .items(&["Yes, clean selected projects", "No, cancel operation"])
+                    .default(1)
+                    .interact()?;
+                
+                if confirm == 0 {
+                    Ok(selected_projects)
+                } else {
+                    Ok(vec![])
+                }
+            } else {
+                println!("{}", "No projects selected".yellow());
+                Ok(vec![])
+            }
+        }
+        2 => { // Review individually
+            let mut selected_projects = Vec::new();
+            
+            for (path, cmd_type, size) in projects.iter() {
+                println!("\n{}", "Project Review:".bold().cyan());
+                println!("  Path: {}", path.display().to_string().green());
+                println!("  Type: {}", cmd_type.purple());
+                println!("  Size: {}", format_size(*size).yellow());
+                
+                let choice = Select::new()
+                    .with_prompt("Action for this project:")
+                    .items(&[
+                        "Clean this project",
+                        "Skip this project",
+                        "Cancel entire operation"
+                    ])
+                    .default(0)
+                    .interact()?;
+                
+                match choice {
+                    0 => selected_projects.push((path.clone(), cmd_type.clone(), *size)),
+                    1 => continue,
+                    2 => return Ok(vec![]),
+                    _ => unreachable!()
                 }
             }
-            if tasks_for_dir.is_empty() {
-                None
+            
+            if !selected_projects.is_empty() {
+                let selected_size: u64 = selected_projects.iter().map(|(_, _, size)| size).copied().sum::<u64>();
+                println!("\nFinal selection will free: {}", format_size(selected_size).bold().red());
+                
+                let confirm = Select::new()
+                    .with_prompt("Proceed with cleaning selected projects?")
+                    .items(&["Yes, proceed with cleaning", "No, cancel operation"])
+                    .default(1)
+                    .interact()?;
+                
+                if confirm == 0 {
+                    Ok(selected_projects)
+                } else {
+                    Ok(vec![])
+                }
             } else {
-                Some(tasks_for_dir)
+                Ok(vec![])
             }
+        }
+        _ => { // Cancel
+            println!("{}", "Operation cancelled by user".yellow());
+            Ok(vec![])
+        }
+    }
+}
+
+pub async fn do_clean_selected_projects(
+    selected_projects: Vec<(PathBuf, String, u64)>,
+    commands: &Vec<Cmd>,
+    max_concurrent: Option<usize>,
+    max_directory_depth: usize,
+    max_files_per_project: usize,
+) -> u32 {
+    if selected_projects.is_empty() {
+        return 0;
+    }
+
+    let cleaning_tasks: Vec<_> = selected_projects
+        .into_iter()
+        .map(|(path, cmd_name, size_before)| {
+            (path, cmd_name, size_before)
         })
-        .flatten()
         .collect();
 
     if cleaning_tasks.is_empty() {
-        println!("{}", "No projects found to clean".yellow());
+        println!("{}", "No projects to clean".yellow());
         return 0;
     }
 
     let total_tasks = cleaning_tasks.len();
+    let total_size_before: u64 = cleaning_tasks.iter().map(|(_, _, size)| size).sum();
+    
     let pb = Arc::new(ProgressBar::new(total_tasks as u64));
     pb.set_style(
         ProgressStyle::default_bar()
@@ -122,48 +304,25 @@ pub async fn do_clean_all(
             .progress_chars("#>-"),
     );
 
-    pb.set_message("Scanning projects...");
+    pb.set_message("Cleaning selected projects...");
 
     // 使用配置的并发限制或默认值
     let max_concurrent_limit = max_concurrent.unwrap_or_else(get_cpu_core_count);
     let semaphore = Arc::new(Semaphore::new(max_concurrent_limit));
-    
-    // 并行计算所有项目的初始大小（带并发限制）
-    let size_futures: Vec<_> = cleaning_tasks
-        .iter()
-        .map(|(path, _)| {
-            let semaphore = Arc::clone(&semaphore);
-            async move {
-                let _permit = semaphore.acquire().await.unwrap();
-                get_dir_size_async(path, max_directory_depth, max_files_per_project).await
-            }
-        })
-        .collect();
-
-    let sizes_before = future::join_all(size_futures).await;
-    let total_size_before: u64 = sizes_before.iter().sum();
-
-    if total_size_before > 0 {
-        pb.set_message(format!(
-            "Total cache size: {}",
-            format_size(total_size_before)
-        ));
-    }
 
     // 准备并行执行的任务（带并发限制）
     let cleaning_futures: Vec<_> = cleaning_tasks
         .into_iter()
-        .zip(sizes_before.into_iter())
-        .map(|((path, cmd_name), size_before)| {
+        .map(|(path, cmd_name, size_before)| {
             let pb = Arc::clone(&pb);
             let semaphore = Arc::clone(&semaphore);
 
             async move {
                 let _permit = semaphore.acquire().await.unwrap();
                 pb.inc(1);
-                pb.set_message(format!("Cleaning {} ({})", path.display(), cmd_name.as_str()));
+                pb.set_message(format!("Cleaning {} ({})", path.display(), cmd_name));
 
-                let cmd = commands.iter().find(|c| c.command_type == cmd_name).unwrap();
+                let cmd = commands.iter().find(|c| c.command_type.as_str() == cmd_name).unwrap();
                 match cmd.run_clean(&path).await {
                     Ok(_) => {
                         let size_after = get_dir_size_async(&path, max_directory_depth, max_files_per_project).await;
@@ -191,7 +350,7 @@ pub async fn do_clean_all(
                             "✗ {} {} - {} (Error: {})",
                             "Failed".red(),
                             path.display(),
-                            cmd_name.as_str(),
+                            cmd_name,
                             e
                         ));
                         (0, size_before, 0)

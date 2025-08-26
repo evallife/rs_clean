@@ -29,17 +29,54 @@ graph TD
 
 ```bash
 $ rs_clean folder/
-````
-
-This command recursively removes build directories in the specified folder and its subdirectories.
-
-You can also exclude specific directory names from cleaning:
-```bash
-$ rs_clean folder/ --exclude-dir node_modules --exclude-dir build
 ```
-Or exclude certain project types:
+
+**🎯 Interactive Experience!**
+When you run `rs_clean`, it now shows you exactly what will be deleted and asks for confirmation:
+
 ```bash
-$ rs_clean folder/ --exclude-type go --exclude-type maven
+$ rs_clean my_projects/
+
+Scanning for projects to clean...
+
+=== Deletion Preview ===
+Found projects to clean:
+  1. my_projects/rust_app (cargo) - 156.2 MB
+  2. my_projects/go_service (go) - 45.8 MB
+  3. my_projects/gradle_app (gradle) - 89.1 MB
+
+Total space to be freed: 291.1 MB
+
+Select cleaning mode:
+> Clean all projects
+  Select specific projects to clean
+  Review each project individually
+  Cancel operation
+```
+
+### 🎮 Navigation Guide
+- **Arrow Keys**: Navigate through options
+- **Enter**: Confirm selection
+- **Space**: Select/deselect items (in multi-select mode)
+- **ESC**: Cancel operation
+
+### 📋 Command Line Options
+
+```bash
+# Basic usage with interactive confirmation
+$ rs_clean folder/
+
+# Skip confirmation prompts (for automation)
+$ rs_clean folder/ --no-confirm
+
+# Preview what would be deleted without actually deleting
+$ rs_clean folder/ --dry-run
+
+# Exclude specific directories
+$ rs_clean folder/ --exclude-dir node_modules --exclude-dir build
+
+# Show detailed output
+$ rs_clean folder/ --verbose
 ```
 
 ---

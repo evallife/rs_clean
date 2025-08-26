@@ -32,6 +32,10 @@ pub struct Config {
     /// Dry run: show what would be cleaned without actually deleting
     #[clap(long, action)]
     pub dry_run: bool,
+
+    /// Skip confirmation prompt and proceed with cleaning
+    #[clap(long, action)]
+    pub no_confirm: bool,
 }
 
 /// Errors that can occur during configuration loading or validation
