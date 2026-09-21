@@ -1,122 +1,37 @@
-# rs_clean Configuration File
+# rs_clean configuration (load-only)
+#
+# Copy this file to one of the discovery locations, or pass it with --config.
+# CLI flags override file values; omitted keys keep built-in defaults.
+#
+# Discovery when --config is absent (first existing file wins):
+#   1. ./rs_clean.toml, ./.rs_clean.toml, ./rs_clean.json, ./.rs_clean.json
+#   2. {config_dir}/rs_clean/rs_clean.toml, then {config_dir}/rs_clean/rs_clean.json
+#      config_dir is dirs::config_dir():
+#        Linux:   ~/.config
+#        Windows: %APPDATA%
+#        macOS:   ~/Library/Application Support
+#   3. ~/.rs_clean/rs_clean.toml
+#
+# There is no `rs_clean config init/set/show` command.
+#
+# Field names match the Config struct. Unknown keys are an error.
 
-This is an example configuration file for rs_clean. You can save this as:
-- `rs_clean.json` or `rs_clean.toml` in your project root
-- `.rs_clean.json` or `.rs_clean.toml` for hidden config
-- `config/rs_clean.json` or `config/rs_clean.toml` in a config directory
+# Directory to scan. Used only when neither a positional PATH nor -p/--path is given.
+path = "."
 
-## Platform-Specific Locations
+# Directory names skipped during the project scan (not cleaner types).
+exclude_dir = ["node_modules", "target", "dist", "build", "vendor"]
 
-### Windows
-- **User config**: `%APPDATA%\rs_clean\rs_clean.toml`
-- **Local config**: `%LOCALAPPDATA%\rs_clean\rs_clean.toml`
-- **Project config**: `rs_clean.toml` in project root
+# Disable cleaners by type: cargo, go, gradle, nodejs (alias: node), flutter, python, mvn.
+# `mvn.cmd` is accepted as mvn. Default is empty (all available cleaners enabled).
+exclude_type = []
 
-### Unix-like (Linux, macOS)
-- **User config**: `~/.rs_clean/rs_clean.toml`
-- **Project config**: `rs_clean.toml` in project root
-- **Hidden config**: `.rs_clean.toml` in project root
+# Max WalkDir depth (start directory is depth 0). Also used when sizing artifact dirs.
+max_directory_depth = 5
 
-## JSON Format Example
+# Cap on files counted while sizing each artifact directory.
+max_files_per_project = 10000
 
-```json
-{
-  "default_path": "/home/user/projects",
-  "exclude_types": ["nodejs", "flutter"],
-  "exclude_dirs": ["vendor", "external"],
-  "max_concurrent": 8,
-  "max_depth": 30,
-  "max_files": 5000,
-  "verbose": true
-}
-```
-
-## TOML Format Example
-
-```toml
-default_path = "/home/user/projects"
-exclude_types = ["nodejs", "flutter"]
-exclude_dirs = ["vendor", "external"]
-max_concurrent = 8
-max_depth = 30
-max_files = 5000
-verbose = true
-```
-
-## Configuration Options
-
-- `default_path`: Default directory to clean (defaults to current directory)
-- `exclude_types`: List of project types to exclude from cleaning
-- `exclude_dirs`: List of directory names to exclude from cleaning
-- `max_concurrent`: Maximum number of concurrent workers (defaults to CPU core count)
-- `max_depth`: Maximum directory depth to scan (defaults to 50)
-- `max_files`: Maximum files per project (defaults to 10000)
-- `verbose`: Show detailed output (defaults to false)
-
-## Command Line Override
-
-Command line arguments always take precedence over configuration file settings:
-
-```bash
-# Override default path from config
-rs_clean /custom/path
-
-# Override exclude types from config
-rs_clean --exclude-type cargo --exclude-type go
-
-# Override exclude dirs from config  
-rs_clean --exclude-dir build --exclude-dir dist
-
-# Use specific config file
-rs_clean --config /path/to/custom-config.json
-
-# Show verbose output
-rs_clean --verbose
-```
-
-## Windows-Specific Usage
-
-### Configuration Commands
-```cmd
-# Initialize user config file (creates %APPDATA%\rs_clean\rs_clean.toml)
-rs_clean config init
-
-# Set configuration values
-rs_clean config set verbose true
-rs_clean config set max_concurrent 4
-rs_clean config set exclude_types cargo,go
-
-# Show current configuration
-rs_clean config show
-```
-
-### Windows Path Examples
-```toml
-# Windows paths in configuration
-default_path = "C:\\Users\\username\\projects"
-exclude_dirs = ["node_modules", "target", "dist"]
-exclude_types = ["cargo", "go", "gradle"]
-max_concurrent = 4
-verbose = true
-```
-
-### Windows PowerShell Usage
-```powershell
-# Initialize config
-rs_clean config init
-
-# Set values with spaces in paths
-rs_clean config set default_path "C:\Projects\MyProject"
-
-# Multiple exclude types
-rs_clean config set exclude_types "cargo,go,gradle"
-
-# Run with config
-rs_clean --verbose
-```
-
-### Cross-Platform Notes
-- Configuration file format is identical across platforms
-- Path separators are handled automatically (use `/` or `\\` in Windows)
-- All commands work the same way on all platforms
-- Configuration priority: CLI args > config file > defaults
+verbose = false
+dry_run = false
+no_confirm = false
