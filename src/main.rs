@@ -1,32 +1,58 @@
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches};
 use colored::*;
-use rs_clean::cmd::Cmd;
-use rs_clean::config::Config;
-use rs_clean::constant::get_cmd_map;
+use rs_clean::config::{CliArgs, Config, FileConfig, resolve_config_file};
 use rs_clean::do_clean_selected_projects;
 use rs_clean::scan_deletion_preview;
+use rs_clean::select_enabled_commands;
 use rs_clean::show_deletion_preview_and_select;
-use rs_clean::utils::command_exists;
 use rs_clean::get_cpu_core_count;
 use std::time::Instant;
 
-/// A fast and simple tool to clean build artifacts from various projects.
-#[derive(Parser, Debug)]
-#[command(version, about, long_about = None)]
-struct Cli {
-    #[clap(flatten)]
-    config: Config,
-}
-
 #[tokio::main]
 async fn main() {
-    let cli = Cli::parse();
-    let config = cli.config;
+    let matches = CliArgs::command().get_matches();
+    let cli = match CliArgs::from_arg_matches(&matches) {
+        Ok(cli) => cli,
+        Err(e) => {
+            e.print().ok();
+            std::process::exit(2);
+        }
+    };
 
-    // Normal cleaning operation
+    let file_path = match resolve_config_file(cli.config.as_deref()) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{} Configuration validation failed:", "Error:".red());
+            eprintln!("  {}", e);
+            eprintln!("{} Please check your configuration.", "Hint:".yellow());
+            std::process::exit(1);
+        }
+    };
+
+    let file = match file_path {
+        Some(ref p) => match FileConfig::load_from_file(p) {
+            Ok(cfg) => Some(cfg),
+            Err(e) => {
+                eprintln!("{} Failed to load config file {}:", "Error:".red(), p.display());
+                eprintln!("  {}", e);
+                std::process::exit(1);
+            }
+        },
+        None => None,
+    };
+
+    let config = match Config::from_cli_and_file(&cli, &matches, file.as_ref()) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("{} Configuration validation failed:", "Error:".red());
+            eprintln!("  {}", e);
+            eprintln!("{} Please check your configuration.", "Hint:".yellow());
+            std::process::exit(1);
+        }
+    };
+
     let start = Instant::now();
 
-    // Validate configuration
     if let Err(e) = config.validate() {
         eprintln!("{} Configuration validation failed:", "Error:".red());
         eprintln!("  {}", e);
@@ -40,26 +66,24 @@ async fn main() {
         if !config.exclude_dir.is_empty() {
             println!("  Exclude dirs: {}", config.exclude_dir.join(", "));
         }
+        if !config.exclude_type.is_empty() {
+            println!("  Exclude types: {}", config.exclude_type.join(", "));
+        }
         println!("  Max directory depth: {}", config.max_directory_depth);
         println!("  Max files per project: {}", config.max_files_per_project);
+        println!("  Dry run: {}", config.dry_run);
+        println!("  No confirm: {}", config.no_confirm);
         println!();
     }
 
-    let map = get_cmd_map();
-    let mut cmd_list = vec![];
-    for (cmd_type, value) in map {
-        if command_exists(cmd_type.as_str()) && !config.exclude_dir.contains(&cmd_type.as_str().to_string()) {
-            cmd_list.push(Cmd::new(*cmd_type, value.clone()));
-        }
-    }
+    let cmd_list = select_enabled_commands(&config.exclude_type);
 
     let init_cmd: Vec<String> = cmd_list.iter().map(|cmd| cmd.command_type.as_str().to_string()).collect();
     println!(
         "Found supported clean commands: {}",
         init_cmd.join(", ").blue()
     );
-    
-    // show the concurrent limits and safety information
+
     let cpu_cores = get_cpu_core_count();
     println!(
         "Using {} concurrent worker{} (CPU cores: {})",
@@ -73,9 +97,8 @@ async fn main() {
         config.max_files_per_project
     );
 
-    // interactive selection process (default behavior)
     println!("{}", "Scanning for projects to clean...".blue());
-    
+
     let selected_projects = match scan_deletion_preview(
         &config.path,
         &cmd_list,

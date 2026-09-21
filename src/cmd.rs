@@ -4,6 +4,8 @@ use tokio::fs;
 use tokio::process::Command;
 use thiserror::Error;
 
+use crate::constant::{NODEJS_ARTIFACT_DIRS, PYTHON_ARTIFACT_DIRS, PYTHON_ARTIFACT_GLOBS};
+
 #[derive(Error, Debug)]
 pub enum CleanError {
     #[error("Failed to execute command '{command}' in '{path}': {source}")]
@@ -48,20 +50,32 @@ impl CommandType {
             CommandType::MavenCmd => "mvn.cmd",
         }
     }
+
+    /// Canonical cleaner type used by `--exclude-type` and config files.
+    /// `node` aliases to `nodejs`; `mvn.cmd` aliases to `mvn`.
+    pub fn canonical_type_name(&self) -> &'static str {
+        match self {
+            CommandType::NodeJs => "nodejs",
+            CommandType::Maven | CommandType::MavenCmd => "mvn",
+            other => other.as_str(),
+        }
+    }
 }
 
-impl From<&str> for CommandType {
-    fn from(s: &str) -> Self {
+impl TryFrom<&str> for CommandType {
+    type Error = String;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
         match s {
-            "cargo" => CommandType::Cargo,
-            "go" => CommandType::Go,
-            "gradle" => CommandType::Gradle,
-            "nodejs" => CommandType::NodeJs,
-            "flutter" => CommandType::Flutter,
-            "python" => CommandType::Python,
-            "mvn" => CommandType::Maven,
-            "mvn.cmd" => CommandType::MavenCmd,
-            _ => panic!("Unknown command type: {}", s), // Should not happen with validated input
+            "cargo" => Ok(CommandType::Cargo),
+            "go" => Ok(CommandType::Go),
+            "gradle" => Ok(CommandType::Gradle),
+            "nodejs" | "node" => Ok(CommandType::NodeJs),
+            "flutter" => Ok(CommandType::Flutter),
+            "python" => Ok(CommandType::Python),
+            "mvn" => Ok(CommandType::Maven),
+            "mvn.cmd" => Ok(CommandType::MavenCmd),
+            _ => Err(format!("Unknown command type: {s}")),
         }
     }
 }
@@ -76,6 +90,27 @@ impl Cmd {
         Self {
             command_type,
             related_files,
+        }
+    }
+
+    /// Build-artifact directory names this cleaner removes (non-glob).
+    /// Go has no stable artifact directory, so this is empty.
+    pub fn artifact_dirs(&self) -> &'static [&'static str] {
+        match self.command_type {
+            CommandType::Cargo => &["target"],
+            CommandType::Gradle | CommandType::Flutter => &["build"],
+            CommandType::Maven | CommandType::MavenCmd => &["target"],
+            CommandType::Go => &[],
+            CommandType::NodeJs => NODEJS_ARTIFACT_DIRS,
+            CommandType::Python => PYTHON_ARTIFACT_DIRS,
+        }
+    }
+
+    /// Glob patterns for artifact directories (Python `*.egg-info`).
+    pub fn artifact_globs(&self) -> &'static [&'static str] {
+        match self.command_type {
+            CommandType::Python => PYTHON_ARTIFACT_GLOBS,
+            _ => &[],
         }
     }
 
@@ -112,17 +147,7 @@ impl Cmd {
     }
 
     async fn clean_nodejs_project(&self, dir: &Path) -> Result<(), CleanError> {
-        let common_node_dirs = vec![
-            "node_modules",
-            "dist",
-            "build",
-            ".next", // Next.js build output
-            "out",   // Common build output or Parcel
-            "coverage", // Test coverage reports
-            ".cache", // General cache directory
-        ];
-
-        for sub_dir_name in common_node_dirs {
+        for sub_dir_name in NODEJS_ARTIFACT_DIRS {
             let path_to_clean = dir.join(sub_dir_name);
             self.remove_dir_if_exists(&path_to_clean).await?;
         }
@@ -140,33 +165,20 @@ impl Cmd {
     }
 
     async fn clean_python_project(&self, dir: &Path) -> Result<(), CleanError> {
-        let common_python_dirs = vec![
-            "__pycache__",
-            "build",
-            "dist",
-            ".eggs",
-            "*.egg-info", // This is a glob pattern, needs special handling or direct removal if possible
-            ".pytest_cache",
-            "htmlcov",
-            ".mypy_cache",
-            "venv", // Common virtual environment name
-            ".venv", // Common virtual environment name
-        ];
+        for sub_dir_name in PYTHON_ARTIFACT_DIRS {
+            let path_to_clean = dir.join(sub_dir_name);
+            self.remove_dir_if_exists(&path_to_clean).await?;
+        }
 
-        for sub_dir_name in common_python_dirs {
-            // For glob patterns like "*.egg-info", we need to list and remove
-            if sub_dir_name.contains('*') {
-                let pattern = dir.join(sub_dir_name).to_string_lossy().into_owned();
-                for entry in glob::glob(&pattern).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))? {
-                    if let Ok(path) = entry {
-                        if path.is_dir() {
-                            self.remove_dir_if_exists(&path).await?;
-                        }
-                    }
+        for glob_pat in PYTHON_ARTIFACT_GLOBS {
+            let pattern = dir.join(glob_pat).to_string_lossy().into_owned();
+            for path in glob::glob(&pattern)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?
+                .flatten()
+            {
+                if path.is_dir() {
+                    self.remove_dir_if_exists(&path).await?;
                 }
-            } else {
-                let path_to_clean = dir.join(sub_dir_name);
-                self.remove_dir_if_exists(&path_to_clean).await?;
             }
         }
         Ok(())
@@ -177,7 +189,7 @@ impl Cmd {
 mod tests {
     use super::*;
     use crate::constant::get_cmd_map;
-    use crate::utils::command_exists;
+    use crate::utils::command_available;
 
     #[test]
     fn test_cmd_creation() {
@@ -191,13 +203,50 @@ mod tests {
         let map = get_cmd_map();
         let cmd_list: Vec<_> = map
             .iter()
-            .filter(|(key, _)| command_exists(key.as_str()))
+            .filter(|(key, _)| command_available(**key))
             .map(|(key, value)| Cmd::new(*key, value.clone()))
             .collect();
 
-        // Depending on the test environment, the number of available commands may vary.
-        // We expect at least 'cargo' to be present.
         assert!(!cmd_list.is_empty());
         assert!(cmd_list.iter().any(|cmd| cmd.command_type == CommandType::Cargo));
+    }
+
+    #[test]
+    fn try_from_supports_aliases_and_rejects_unknown() {
+        assert_eq!(CommandType::try_from("node").unwrap(), CommandType::NodeJs);
+        assert_eq!(CommandType::try_from("nodejs").unwrap(), CommandType::NodeJs);
+        assert_eq!(CommandType::try_from("mvn").unwrap(), CommandType::Maven);
+        assert_eq!(CommandType::try_from("mvn.cmd").unwrap(), CommandType::MavenCmd);
+        assert!(CommandType::try_from("cmake").is_err());
+        assert_eq!(CommandType::Maven.canonical_type_name(), "mvn");
+        assert_eq!(CommandType::MavenCmd.canonical_type_name(), "mvn");
+        assert_eq!(CommandType::NodeJs.canonical_type_name(), "nodejs");
+    }
+
+    #[test]
+    fn artifact_dirs_match_cleaner_lists() {
+        let node = Cmd::new(CommandType::NodeJs, vec!["package.json"]);
+        assert_eq!(node.artifact_dirs(), NODEJS_ARTIFACT_DIRS);
+        assert!(node.artifact_globs().is_empty());
+
+        let python = Cmd::new(CommandType::Python, vec!["requirements.txt"]);
+        assert_eq!(python.artifact_dirs(), PYTHON_ARTIFACT_DIRS);
+        assert_eq!(python.artifact_globs(), PYTHON_ARTIFACT_GLOBS);
+
+        let cargo = Cmd::new(CommandType::Cargo, vec!["Cargo.toml"]);
+        assert_eq!(cargo.artifact_dirs(), &["target"]);
+
+        let go = Cmd::new(CommandType::Go, vec!["go.mod"]);
+        assert!(go.artifact_dirs().is_empty());
+        assert!(go.artifact_globs().is_empty());
+
+        let gradle = Cmd::new(CommandType::Gradle, vec!["build.gradle"]);
+        assert_eq!(gradle.artifact_dirs(), &["build"]);
+
+        let flutter = Cmd::new(CommandType::Flutter, vec!["pubspec.yaml"]);
+        assert_eq!(flutter.artifact_dirs(), &["build"]);
+
+        let maven = Cmd::new(CommandType::Maven, vec!["pom.xml"]);
+        assert_eq!(maven.artifact_dirs(), &["target"]);
     }
 }
